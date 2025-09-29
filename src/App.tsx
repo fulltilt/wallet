@@ -1,4 +1,21 @@
-import { useState } from "react";
+import React, { useCallback, useState } from "react";
+import { Buffer } from "buffer";
+window.Buffer = Buffer;
+
+import nacl from "tweetnacl";
+import { generateMnemonic, mnemonicToSeedSync } from "bip39";
+import { derivePath } from "ed25519-hd-key";
+
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  PublicKey,
+  sendAndConfirmTransaction,
+  SystemProgram,
+  Transaction,
+} from "@solana/web3.js";
+
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 import {
@@ -13,232 +30,256 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Check, ChevronUp, Copy, Plus, Trash2, Wallet } from "lucide-react";
-import { Buffer } from "buffer";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
+import {
+  Check,
+  ChevronUp,
+  Copy,
+  Plus,
+  Send,
+  Trash2,
+  Wallet,
+} from "lucide-react";
+import { SendDialog } from "./components/ui/SendDialog";
 
-import nacl from "tweetnacl";
-import { generateMnemonic, mnemonicToSeedSync } from "bip39";
-import { derivePath } from "ed25519-hd-key";
-import { Keypair } from "@solana/web3.js";
-window.Buffer = Buffer;
-
-type Wallet = {
+export type Wallet = {
   id: number;
   publicKey: string;
-  privateKey: string;
+  privateKey: string; // hex-encoded secretKey (Uint8Array -> hex)
+};
+
+type SendForm = {
+  recipient: string;
+  amount: string;
+};
+
+type SendResult = {
+  loading: boolean;
+  success: boolean;
+  message: string;
+  signature?: string;
+};
+
+type BalanceState = {
+  sol: number;
+  lamports: number;
+  loading: boolean;
+  error: string | null;
 };
 
 const SOLANA_RPC_URL = `https://long-indulgent-log.solana-devnet.quiknode.pro/${
   import.meta.env.VITE_RPC_TOKEN
 }`;
 
-function App() {
+const connection = new Connection(SOLANA_RPC_URL, "confirmed");
+
+async function rpcCall(method: string, params: any[] = []) {
+  const res = await fetch(SOLANA_RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const body = await res.json();
+  if (body.error) throw new Error(body.error.message || "RPC error");
+  return body.result;
+}
+
+const secretKeyToHex = (sk: Uint8Array) => Buffer.from(sk).toString("hex");
+const hexToSecretKey = (hex: string) =>
+  Uint8Array.from(Buffer.from(hex, "hex"));
+
+const App: React.FC = () => {
   const [input, setInput] = useState("");
   const [isOpen, setIsOpen] = useState(false);
   const [seedPhrase, setSeedPhrase] = useState<string[]>([]);
-  const [seed, setSeed] = useState("");
+  const [seedHex, setSeedHex] = useState<string>(""); // mnemonicToSeedSync -> Buffer -> hex
   const [copied, setCopied] = useState(false);
+
   const [walletNum, setWalletNum] = useState(0);
   const [wallets, setWallets] = useState<Wallet[]>([]);
+
   const [balanceDialogOpen, setBalanceDialogOpen] = useState(false);
-  const [currentBalance, setCurrentBalance] = useState<{
-    sol: number;
-    lamports: number;
-    loading: boolean;
-    error: string | null;
-  }>({
+  const [sendDialogOpen, setSendDialogOpen] = useState(false);
+  const [selectedWallet, setSelectedWallet] = useState<Wallet | null>(null);
+
+  const [sendForm, setSendForm] = useState<SendForm>({
+    recipient: "",
+    amount: "",
+  });
+  const [sendResult, setSendResult] = useState<SendResult>({
+    loading: false,
+    success: false,
+    message: "",
+  });
+
+  const [currentBalance, setCurrentBalance] = useState<BalanceState>({
     sol: 0,
     lamports: 0,
     loading: false,
     error: null,
   });
 
-  const generateSeedPhrase = () => {
-    if (input.length === 0) {
+  const generateSeedPhrase = useCallback(() => {
+    if (!input.trim()) {
       const mnemonic = generateMnemonic();
-      setSeedPhrase(mnemonic.split(" "));
+      const words = mnemonic.split(" ");
+      setSeedPhrase(words);
 
-      const seed = mnemonicToSeedSync(mnemonic); // returns a Buffer
-      setSeed(seed.toString("hex"));
+      const seed = mnemonicToSeedSync(mnemonic); // Buffer
+      setSeedHex(seed.toString("hex"));
+      setIsOpen(true);
+      return;
+    }
 
+    const words = input.trim().split(/\s+/);
+    if (words.length === 12) {
+      setSeedPhrase(words);
+      const seed = mnemonicToSeedSync(words.join(" "));
+      setSeedHex(seed.toString("hex"));
       setIsOpen(true);
     } else {
-      const words = input.split(" ");
-      if (words.length === 12) setSeedPhrase(words);
-      else console.log("seed phrase must be 12 words long");
+      console.warn("seed phrase must be 12 words long");
     }
-  };
+  }, [input]);
 
-  const addWallet = () => {
-    // 501 = Solana
-    // 1 - Bitcoin
-    // 60 - Ethereum
+  const addWallet = useCallback(() => {
+    if (!seedHex) {
+      console.warn("seed not available — generate or set a seed phrase first");
+      return;
+    }
+
     const path = `m/44'/501'/${walletNum}'/0'`;
-    const derivedSeed = derivePath(path, seed).key;
-    const privateKey = nacl.sign.keyPair.fromSeed(derivedSeed).secretKey; // returns a Uint8Array
-    const publicKey = Keypair.fromSecretKey(privateKey).publicKey.toBase58();
+    const derivedSeed = (derivePath as any)(
+      path,
+      Buffer.from(seedHex, "hex")
+    ).key;
+    const secretKey = nacl.sign.keyPair.fromSeed(derivedSeed).secretKey; // Uint8Array(64)
+    const kp = Keypair.fromSecretKey(secretKey);
+    const publicKey = kp.publicKey.toBase58();
 
-    setWallets([
-      ...wallets,
-      {
-        id: walletNum,
-        privateKey: Buffer.from(privateKey).toString("hex"),
-        publicKey,
-      },
+    setWallets((prev) => [
+      ...prev,
+      { id: walletNum, privateKey: secretKeyToHex(secretKey), publicKey },
     ]);
-    setWalletNum((prev) => prev + 1);
-  };
+    setWalletNum((n) => n + 1);
+  }, [seedHex, walletNum]);
 
-  const makeSolanaRpcCall = async (method: string, params: any[] = []) => {
-    try {
-      const response = await fetch(SOLANA_RPC_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: method,
-          params: params,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      if (data.error) {
-        throw new Error(`RPC Error: ${data.error.message}`);
-      }
-
-      return data.result;
-    } catch (error) {
-      console.error("RPC call failed:", error);
-      throw error;
-    }
-  };
-
-  const getBalance = async (publicKey: string) => {
+  const getBalance = useCallback(async (publicKey: string) => {
     setBalanceDialogOpen(true);
     setCurrentBalance({ sol: 0, lamports: 0, loading: true, error: null });
 
     try {
-      const result = await makeSolanaRpcCall("getBalance", [publicKey]);
-
-      // Result returns lamports (1 SOL = 1,000,000,000 lamports)
+      const result = await rpcCall("getBalance", [publicKey]);
       const lamports = result.value;
-      const sol = lamports / 1_000_000_000;
-
       setCurrentBalance({
-        sol,
+        sol: lamports / LAMPORTS_PER_SOL,
         lamports,
         loading: false,
         error: null,
       });
-    } catch (error) {
-      console.error("Failed to get balance:", error);
+    } catch (err) {
       setCurrentBalance({
         sol: 0,
         lamports: 0,
         loading: false,
-        error:
-          error instanceof Error ? error.message : "Failed to fetch balance",
+        error: err instanceof Error ? err.message : String(err),
       });
     }
-  };
+  }, []);
 
-  async function getAccountInfo(publicKey: string) {
-    try {
-      const result = await makeSolanaRpcCall("getAccountInfo", [
-        publicKey,
-        { encoding: "jsonParsed" },
-      ]);
+  const openSendDialog = useCallback((wallet: Wallet) => {
+    setSelectedWallet(wallet);
+    setSendForm({ recipient: "", amount: "" });
+    setSendResult({ loading: false, success: false, message: "" });
+    setSendDialogOpen(true);
+  }, []);
 
-      return result;
-    } catch (error) {
-      console.error("Failed to get account info:", error);
-      throw error;
-    }
-  }
-
-  // Get recent blockhash
-  async function getRecentBlockhash() {
-    try {
-      const result = await makeSolanaRpcCall("getLatestBlockhash");
-      return result;
-    } catch (error) {
-      console.error("Failed to get recent blockhash:", error);
-      throw error;
-    }
-  }
-
-  // Request airdrop (devnet only)
-  async function requestAirdrop(
-    publicKey: string,
-    lamports: number = 1_000_000_000
-  ) {
-    try {
-      const signature = await makeSolanaRpcCall("requestAirdrop", [
-        publicKey,
-        lamports,
-      ]);
-
+  const sendSOL = useCallback(
+    async (fromKeypair: Keypair, toPublicKey: string, amountInSOL: number) => {
+      const toPubkey = new PublicKey(toPublicKey);
+      const lamports = Math.round(amountInSOL * LAMPORTS_PER_SOL);
+      const transaction = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: fromKeypair.publicKey,
+          toPubkey,
+          lamports,
+        })
+      );
+      const signature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [fromKeypair]
+      );
       return signature;
-    } catch (error) {
-      console.error("Failed to request airdrop:", error);
-      throw error;
-    }
-  }
+    },
+    []
+  );
 
-  // Get transaction details
-  async function getTransaction(signature: string) {
+  const handleSendSOL = useCallback(async () => {
+    if (!selectedWallet) return;
+
+    if (!sendForm.recipient.trim()) {
+      setSendResult({
+        loading: false,
+        success: false,
+        message: "Please enter a recipient address",
+      });
+      return;
+    }
+    const amount = parseFloat(sendForm.amount);
+    if (isNaN(amount) || amount <= 0) {
+      setSendResult({
+        loading: false,
+        success: false,
+        message: "Please enter a valid amount",
+      });
+      return;
+    }
+
+    setSendResult({ loading: true, success: false, message: "" });
+
     try {
-      const result = await makeSolanaRpcCall("getTransaction", [
+      const secretKey = hexToSecretKey(selectedWallet.privateKey);
+      const kp = Keypair.fromSecretKey(secretKey);
+      const signature = await sendSOL(kp, sendForm.recipient, amount);
+
+      setSendResult({
+        loading: false,
+        success: true,
+        message: "Transaction successful!",
         signature,
-        { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
-      ]);
-
-      return result;
-    } catch (error) {
-      console.error("Failed to get transaction:", error);
-      throw error;
+      });
+      // clear form after a short delay
+      setTimeout(() => setSendForm({ recipient: "", amount: "" }), 3000);
+    } catch (err) {
+      setSendResult({
+        loading: false,
+        success: false,
+        message: err instanceof Error ? err.message : "Transaction failed",
+      });
     }
-  }
+  }, [selectedWallet, sendForm, sendSOL]);
 
-  // Get multiple accounts
-  async function getMultipleAccounts(publicKeys: string[]) {
-    try {
-      const result = await makeSolanaRpcCall("getMultipleAccounts", [
-        publicKeys,
-        { encoding: "jsonParsed" },
-      ]);
-
-      return result;
-    } catch (error) {
-      console.error("Failed to get multiple accounts:", error);
-      throw error;
-    }
-  }
-
-  const handleCopy = async () => {
+  const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(seedPhrase.join(" "));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
-      console.error("Failed to copy text: ", err);
+      console.error("copy failed", err);
     }
-  };
+  }, [seedPhrase]);
 
   return (
     <div className="container mx-auto p-4 space-y-6">
-      {/* Input Section */}
+      {/* Seed input */}
       <div className="flex gap-2">
         <Input
+          value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Enter your secret phrase (or leave blank to generate)"
           className="flex-1 bg-background border-border text-foreground placeholder:text-muted-foreground"
@@ -248,7 +289,7 @@ function App() {
         </Button>
       </div>
 
-      {/* Seed Phrase Section */}
+      {/* Seed phrase collapsible */}
       <Collapsible open={isOpen} onOpenChange={setIsOpen}>
         <Card className="bg-card border-border">
           <CollapsibleTrigger asChild>
@@ -267,11 +308,10 @@ function App() {
 
           <CollapsibleContent>
             <CardContent className="p-6 pt-0">
-              {/* Seed phrase grid */}
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-6">
-                {seedPhrase.map((word, index) => (
+                {seedPhrase.map((word, i) => (
                   <div
-                    key={index}
+                    key={i}
                     className="bg-muted border border-border rounded-lg px-3 py-3 text-center hover:bg-muted/80 transition-colors"
                   >
                     <span className="text-muted-foreground text-sm font-medium">
@@ -288,13 +328,11 @@ function App() {
               >
                 {copied ? (
                   <>
-                    <Check className="w-4 h-4 mr-2" />
-                    Copied!
+                    <Check className="w-4 h-4 mr-2" /> Copied!
                   </>
                 ) : (
                   <>
-                    <Copy className="w-4 h-4 mr-2" />
-                    Click Anywhere To Copy
+                    <Copy className="w-4 h-4 mr-2" /> Click Anywhere To Copy
                   </>
                 )}
               </Button>
@@ -303,7 +341,7 @@ function App() {
         </Card>
       </Collapsible>
 
-      {/* Wallet Controls */}
+      {/* Wallet controls */}
       <div className="flex gap-4">
         <Button onClick={addWallet} className="flex items-center gap-2">
           <Plus className="w-4 h-4" />
@@ -311,48 +349,57 @@ function App() {
         </Button>
         <Button
           variant="outline"
-          // onClick={clearWallets}
           className="flex items-center gap-2 text-destructive hover:text-destructive"
         >
-          <Trash2 className="w-4 h-4" />
-          Clear Wallets
+          <Trash2 className="w-4 h-4" /> Clear Wallets
         </Button>
       </div>
 
-      {/* Wallets Section */}
+      {/* Wallets list */}
       <div className="space-y-4">
         <h2 className="text-2xl font-bold text-foreground">Wallets</h2>
-        {wallets.map((wallet) => (
-          <Card key={wallet.id} className="bg-card border-border">
+        {wallets.map((w) => (
+          <Card key={w.id} className="bg-card border-border">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-card-foreground">
-                Wallet #{wallet.id}
+                Wallet #{w.id}
               </CardTitle>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => getBalance(wallet.publicKey)}
-                className="flex items-center gap-2"
-              >
-                <Wallet className="w-4 h-4" />
-                Check Balance
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => getBalance(w.publicKey)}
+                  className="flex items-center gap-2"
+                >
+                  <Wallet className="w-4 h-4" /> Check Balance
+                </Button>
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => openSendDialog(w)}
+                  className="flex items-center gap-2"
+                >
+                  <Send className="w-4 h-4" /> Send SOL
+                </Button>
+              </div>
             </CardHeader>
+
             <CardContent className="space-y-3">
               <div>
                 <label className="text-sm font-medium text-muted-foreground">
                   Public Key
                 </label>
                 <p className="text-sm font-mono bg-muted p-2 text-foreground break-all">
-                  {wallet.publicKey}
+                  {w.publicKey}
                 </p>
               </div>
+
               <div>
                 <label className="text-sm font-medium text-muted-foreground">
                   Private Key
                 </label>
                 <p className="text-sm font-mono bg-muted p-2 text-foreground break-all blur-sm hover:blur-none transition-all cursor-pointer">
-                  {wallet.privateKey}
+                  {w.privateKey}
                 </p>
               </div>
             </CardContent>
@@ -360,7 +407,7 @@ function App() {
         ))}
       </div>
 
-      {/* Balance Dialog */}
+      {/* Balance dialog */}
       <Dialog open={balanceDialogOpen} onOpenChange={setBalanceDialogOpen}>
         <DialogContent className="bg-background border-border">
           <DialogHeader>
@@ -373,24 +420,20 @@ function App() {
           </DialogHeader>
 
           <div className="space-y-4 py-4">
-            {currentBalance.loading && (
+            {currentBalance.loading ? (
               <div className="text-center py-8">
-                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
                 <p className="mt-2 text-muted-foreground">
                   Fetching balance...
                 </p>
               </div>
-            )}
-
-            {currentBalance.error && (
+            ) : currentBalance.error ? (
               <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
                 <p className="text-destructive text-sm">
                   {currentBalance.error}
                 </p>
               </div>
-            )}
-
-            {!currentBalance.loading && !currentBalance.error && (
+            ) : (
               <div className="space-y-4">
                 <div className="bg-muted rounded-lg p-6 text-center">
                   <p className="text-4xl font-bold text-foreground">
@@ -398,7 +441,6 @@ function App() {
                   </p>
                   <p className="text-muted-foreground mt-1">SOL</p>
                 </div>
-
                 <div className="bg-muted/50 rounded-lg p-4">
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-muted-foreground">
@@ -414,8 +456,19 @@ function App() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Send SOL dialog */}
+      <SendDialog
+        selectedWallet={selectedWallet}
+        sendDialogOpen={sendDialogOpen}
+        setSendDialogOpen={setSendDialogOpen}
+        sendForm={sendForm}
+        setSendForm={setSendForm}
+        handleSendSOL={handleSendSOL}
+        sendResult={sendResult}
+      />
     </div>
   );
-}
+};
 
 export default App;
