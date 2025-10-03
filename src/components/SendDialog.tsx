@@ -8,8 +8,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { Wallet } from "@/App";
 import { Send } from "lucide-react";
+import type { Wallet } from "./WalletManager";
 
 type SendDialogProps = {
   selectedWallet: Wallet | null;
@@ -39,24 +39,22 @@ export const SendDialog = ({
 }: SendDialogProps) => {
   return (
     <Dialog open={sendDialogOpen} onOpenChange={setSendDialogOpen}>
-      <DialogContent className="bg-background border-border sm:max-w-md">
+      <DialogContent className="sm:max-w-md border-2 bg-white dark:bg-black">
         <DialogHeader>
-          <DialogTitle className="text-foreground">Send SOL</DialogTitle>
-          <DialogDescription className="text-muted-foreground">
-            Send SOL from {selectedWallet?.id}
-          </DialogDescription>
+          <DialogTitle className="text-2xl font-bold">Send SOL</DialogTitle>
+          <DialogDescription>Transfer SOL to another wallet</DialogDescription>
         </DialogHeader>
-
-        <div className="space-y-4 py-4">
-          <div className="bg-muted/50 rounded-lg p-3">
-            <Label className="text-xs text-muted-foreground">From</Label>
-            <p className="text-sm font-mono text-foreground break-all mt-1">
+        <div className="space-y-5 py-2">
+          <div className="bg-muted/50 border-2 rounded-xl p-4">
+            <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              From
+            </Label>
+            <p className="text-sm font-mono break-all mt-2">
               {selectedWallet?.publicKey}
             </p>
           </div>
-
           <div className="space-y-2">
-            <Label htmlFor="recipient" className="text-foreground">
+            <Label htmlFor="recipient" className="font-semibold">
               Recipient Address
             </Label>
             <Input
@@ -64,40 +62,34 @@ export const SendDialog = ({
               placeholder="Enter recipient's public key"
               value={sendForm.recipient}
               onChange={(e) =>
-                setSendForm((s) => ({ ...s, recipient: e.target.value }))
+                setSendForm({ ...sendForm, recipient: e.target.value })
               }
-              className="bg-background border-border text-foreground"
-              disabled={sendResult.loading}
+              className="h-11 border-2"
             />
           </div>
-
           <div className="space-y-2">
-            <Label htmlFor="amount" className="text-foreground">
+            <Label htmlFor="amount" className="font-semibold">
               Amount (SOL)
             </Label>
             <Input
               id="amount"
               type="number"
               placeholder="0.0"
-              step="0.001"
-              min="0"
               value={sendForm.amount}
               onChange={(e) =>
-                setSendForm((s) => ({ ...s, amount: e.target.value }))
+                setSendForm({ ...sendForm, amount: e.target.value })
               }
-              className="bg-background border-border text-foreground"
-              disabled={sendResult.loading}
+              className="h-11 border-2"
             />
           </div>
-
           <Button
             onClick={handleSendSOL}
             disabled={sendResult.loading}
-            className="w-full"
+            className="w-full h-11 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 shadow-lg"
           >
             {sendResult.loading ? (
               <>
-                <div className="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                <div className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent mr-2"></div>
                 Sending...
               </>
             ) : (
@@ -107,29 +99,23 @@ export const SendDialog = ({
               </>
             )}
           </Button>
-
           {sendResult.message && (
             <div
-              className={`rounded-lg p-4 ${
+              className={`rounded-xl p-4 border-2 ${
                 sendResult.success
-                  ? "bg-green-500/10 border border-green-500/20"
-                  : "bg-destructive/10 border border-destructive/20"
+                  ? "bg-green-50 border-green-500 dark:bg-green-950/20"
+                  : "bg-red-50 border-red-500 dark:bg-red-950/20"
               }`}
             >
               <p
-                className={`text-sm font-medium ${
+                className={`font-medium ${
                   sendResult.success
-                    ? "text-green-600 dark:text-green-400"
-                    : "text-destructive"
+                    ? "text-green-700 dark:text-green-400"
+                    : "text-red-700 dark:text-red-400"
                 }`}
               >
                 {sendResult.message}
               </p>
-              {sendResult.signature && (
-                <p className="text-xs font-mono text-muted-foreground mt-2 break-all">
-                  {sendResult.signature}
-                </p>
-              )}
             </div>
           )}
         </div>
